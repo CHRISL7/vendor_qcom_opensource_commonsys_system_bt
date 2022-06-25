@@ -148,8 +148,11 @@ bool gatt_eatt_bcb_dealloc(tGATT_TCB* p_tcb, uint16_t lcid) {
       gatt_remove_conns_by_cid(p_tcb, p_eatt_bcb->cid);
 
       if (lcid != L2CAP_ATT_CID) {
+        alarm_cancel(p_eatt_bcb->ind_ack_timer);
         alarm_free(p_eatt_bcb->ind_ack_timer);
         p_eatt_bcb->ind_ack_timer = NULL;
+
+        alarm_cancel(p_eatt_bcb->conf_timer);
         alarm_free(p_eatt_bcb->conf_timer);
         p_eatt_bcb->conf_timer = NULL;
         gatt_free_pending_ind(p_eatt_bcb->p_tcb, lcid);
@@ -196,8 +199,10 @@ uint8_t gatt_eatt_bcb_in_progress_dealloc(RawAddress& bda) {
       p_eatt_bcb = &gatt_cb.eatt_bcb[i];
 
       if (p_eatt_bcb->cid != L2CAP_ATT_CID) {
+        alarm_cancel(p_eatt_bcb->ind_ack_timer);
         alarm_free(p_eatt_bcb->ind_ack_timer);
         p_eatt_bcb->ind_ack_timer = NULL;
+        alarm_cancel(p_eatt_bcb->conf_timer);
         alarm_free(p_eatt_bcb->conf_timer);
         p_eatt_bcb->conf_timer = NULL;
         gatt_free_pending_ind(p_eatt_bcb->p_tcb, p_eatt_bcb->cid);
@@ -476,6 +481,7 @@ tGATT_EBCB* gatt_find_best_eatt_bcb(tGATT_TCB* p_tcb, tGATT_IF gatt_if, uint16_t
     gatt_add_conn(conn_id, p_eatt_bcb->cid);
   }
   else {
+    VLOG(1) << __func__ << " Disconnect LE link as no suitable ATT/EATT channels availble:";
     uint16_t conn_handle = BTM_GetHCIConnHandle(p_tcb->peer_bda, BT_TRANSPORT_LE);
     btm_sec_disconnect(conn_handle, GATT_CONN_TERMINATE_LOCAL_HOST);
   }
@@ -1380,4 +1386,59 @@ bool eatt_congest_notify_apps(tGATT_TCB* p_tcb, uint16_t cid, bool congested) {
   }
 
   return ret;
+}
+
+/*******************************************************************************
+ *
+ * Function         gatt_send_conn_cb_after_enc_failure
+ *
+ * Description      The function sends connection complete cb to apps which have
+ *                  requested for EATT after encryption failure.
+ *                  Encryption failure generally happens with Pin or Key Missing
+ *                  status.
+ *
+ * Returns          void
+ *
+ ******************************************************************************/
+void gatt_send_conn_cb_after_enc_failure(tGATT_TCB* p_tcb) {
+  uint8_t i;
+  tGATT_REG* p_reg;
+  uint16_t conn_id;
+
+  if (!p_tcb) {
+    VLOG(1) << __func__ << "p_tcb is NULL ";
+    return;
+  }
+
+  VLOG(1) << __func__ << " : address " << p_tcb->peer_bda;
+  std::set<tGATT_IF> apps =
+      connection_manager::get_apps_connecting_to(p_tcb->peer_bda);
+  std::unordered_set<uint8_t> dir_conn_apps = p_tcb->app_hold_link;
+  bool is_eatt_dev = is_eatt_device(p_tcb->peer_bda);
+
+  /* notifying all applications for the connection up event */
+  for (i = 0, p_reg = gatt_cb.cl_rcb; i < GATT_MAX_APPS; i++, p_reg++) {
+    bool is_app_req_eatt_conn = false;
+    if (!p_reg->in_use) continue;
+
+    if (apps.find(p_reg->gatt_if) != apps.end()) {
+      if (p_reg->eatt_support)
+        is_app_req_eatt_conn = true;
+    }
+
+    if (dir_conn_apps.find(p_reg->gatt_if) != dir_conn_apps.end()) {
+      if (p_reg->eatt_support)
+        is_app_req_eatt_conn = true;
+    }
+
+    if (is_eatt_dev && is_app_req_eatt_conn) {
+      if (p_reg->app_cb.p_conn_cb) {
+        conn_id = GATT_CREATE_CONN_ID(p_tcb->tcb_idx, p_reg->gatt_if);
+        VLOG(1) << __func__ << " Sending conn cb after encrypt failure:"
+                               " conn_id: " << conn_id;
+        (*p_reg->app_cb.p_conn_cb)(p_reg->gatt_if, p_tcb->peer_bda, conn_id, true,
+                                   0, p_tcb->transport);
+      }
+    }
+  }
 }

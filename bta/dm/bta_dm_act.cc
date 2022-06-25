@@ -52,6 +52,7 @@
 #include "osi/include/properties.h"
 #include "sdp_api.h"
 #include "bta_sdp_api.h"
+#include "stack/btm/btm_ble_int.h"
 #include "stack/gatt/connection_manager.h"
 #include "stack/include/gatt_api.h"
 #include "utl.h"
@@ -681,29 +682,27 @@ void bta_dm_disable(UNUSED_ATTR tBTA_DM_MSG* p_data) {
  *
  ******************************************************************************/
 static void bta_dm_disable_timer_cback(void* data) {
-  uint8_t i;
-  tBT_TRANSPORT transport = BT_TRANSPORT_BR_EDR;
   bool trigger_disc = false;
   uint32_t param = PTR_TO_UINT(data);
+  tACL_CONN* p = &btm_cb.acl_db[0];
+  uint16_t xx;
 
   APPL_TRACE_WARNING("%s trial %u", __func__, param);
 
   if (param == 2) {
     if (BTM_GetNumAclLinks()) {
-      for (i = 0; i < bta_dm_cb.device_list.count; i++) {
-        transport = bta_dm_cb.device_list.peer_device[i].transport;
-        if (BT_TRANSPORT_BR_EDR == transport) {
-          btm_remove_acl(bta_dm_cb.device_list.peer_device[i].peer_bdaddr,
-                  transport);
+      for (xx = 0; xx < MAX_L2CAP_LINKS; xx++, p++) {
+        if (p->in_use && (BT_TRANSPORT_BR_EDR ==  p->transport)) {
+          btm_remove_acl(p->remote_addr, p->transport);
         }
       }
     }
   }else if (BTM_GetNumAclLinks() && (param == 0)) {
-    for (i = 0; i < bta_dm_cb.device_list.count; i++) {
-      transport = bta_dm_cb.device_list.peer_device[i].transport;
-      btm_remove_acl(bta_dm_cb.device_list.peer_device[i].peer_bdaddr,
-                     transport);
-      trigger_disc = true;
+    trigger_disc = true;
+    for (xx = 0; xx < MAX_L2CAP_LINKS; xx++, p++) {
+      if (p->in_use) {
+        btm_remove_acl(p->remote_addr, p->transport);
+      }
     }
 
     /* Retrigger disable timer in case ACL disconnect failed, DISABLE_EVT still
@@ -1075,6 +1074,12 @@ void bta_dm_remove_device(tBTA_DM_MSG* p_data) {
   /* Delete the other paired device too */
   if (continue_delete_other_dev && !other_address.IsEmpty())
     bta_dm_process_remove_device(other_address);
+
+  /* Check the length of the paired devices, and if 0 then reset IRK */
+  if (btif_storage_get_num_bonded_devices() < 1) {
+    LOG(INFO) << "Last paired device removed, resetting IRK";
+    btm_ble_reset_id();
+  }
 }
 
 /*******************************************************************************
@@ -2202,6 +2207,11 @@ void bta_dm_search_cmpl(tBTA_DM_MSG* p_data) {
     bta_dm_di_disc_cmpl(p_data);
   else
     bta_dm_search_cb.p_search_cback(BTA_DM_DISC_CMPL_EVT, NULL);
+  if (bta_dm_search_cb.p_search_queue) {
+   APPL_TRACE_API("search queue is not empty ");
+   bta_sys_sendmsg(bta_dm_search_cb.p_search_queue);
+   bta_dm_search_cb.p_search_queue = NULL;
+  }
   BTA_DmProcessQueuedServiceDiscovery();
 }
 
@@ -4894,6 +4904,7 @@ static void bta_dm_observe_results_cb(tBTM_INQ_RESULTS* p_inq, uint8_t* p_eir,
   result.inq_res.bd_addr = p_inq->remote_bd_addr;
   result.inq_res.original_bda = p_inq->original_bda;
   result.inq_res.rssi = p_inq->rssi;
+  result.inq_res.original_bda = p_inq->original_bda;
   result.inq_res.ble_addr_type = p_inq->ble_addr_type;
   result.inq_res.inq_result_type = p_inq->inq_result_type;
   result.inq_res.device_type = p_inq->device_type;
